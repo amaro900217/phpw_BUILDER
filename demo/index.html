@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>PHP WASM con SQLite y medición de tiempos</title>
+</head>
+<body>
+  <h2>PHP WASM Ejemplo con SQLite y fetch de .wasm</h2>
+  <pre id="out"></pre>
+
+  <script type="module">
+    import createPhpModule from './php-web.mjs';
+    const out = document.getElementById('out');
+    const log = txt => { console.log(txt); out.textContent += txt + "\n"; };
+
+    (async () => {
+      const times = {};
+      const t0 = performance.now();
+
+      log('⚡ Cargando .wasm manualmente…');
+      const t1 = performance.now();
+      const wasmResponse = await fetch('php-web.wasm');
+      const wasmArrayBuffer = await wasmResponse.arrayBuffer();
+      const t2 = performance.now();
+      times.fetchWasm = t2 - t1;
+      log(`✅ .wasm cargado en ${times.fetchWasm.toFixed(2)} ms`);
+
+      log('⚡ Inicializando módulo PHP WASM…');
+      const t3 = performance.now();
+      const Module = await createPhpModule({
+        wasmBinary: wasmArrayBuffer,
+        print: txt => txt && log('[STDOUT] ' + txt),
+        printErr: txt => {
+          if (txt && !txt.includes('munmap() failed: [28] Invalid argument')) {
+            log('[STDERR] ' + txt);
+          }
+        },
+      });
+      const t4 = performance.now();
+      times.initModule = t4 - t3;
+      log(`✅ Módulo inicializado en ${times.initModule.toFixed(2)} ms`);
+
+      const { ccall, FS } = Module;
+
+      log('📂 Montando FS persistente IDBFS…');
+      const t5 = performance.now();
+      FS.mkdir('/data');
+      FS.mount(FS.filesystems.IDBFS, {}, '/data');
+      await new Promise(resolve => FS.syncfs(true, resolve));
+      const t6 = performance.now();
+      times.mountFS = t6 - t5;
+      log(`✅ FS montado y sincronizado en ${times.mountFS.toFixed(2)} ms`);
+
+      FS.chdir('/data');
+
+      log('⚡ Inicializando motor PHP…');
+      const t7 = performance.now();
+      ccall('php_embed_init', 'number', ['number','number'], [0,0]);
+      const t8 = performance.now();
+      times.initPHP = t8 - t7;
+      log(`✅ Motor PHP inicializado en ${times.initPHP.toFixed(2)} ms`);
+
+      // --- Ejecutar código PHP básico ---
+      log('⚡ Ejecutando script de prueba…');
+      const t9 = performance.now();
+      ccall('zend_eval_string', 'number', ['string','number','number'], [
+        'echo "Hola desde PHP WASM!\\n"; echo phpversion() . "\\n";', 0, 0
+      ]);
+      const t10 = performance.now();
+      times.evalScript = t10 - t9;
+      log(`✅ Script ejecutado en ${times.evalScript.toFixed(2)} ms`);
+
+      // --- Test SQLite completo ---
+      log('⚡ Ejecutando prueba de SQLite…');
+      const t11 = performance.now();
+      const sqliteTest = `
+        $db = new SQLite3('db.sqlite');
+        $db->exec("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT)");
+        $db->exec("INSERT INTO users (name) VALUES ('Alice')");
+        $db->exec("INSERT INTO users (name) VALUES ('Bob')");
+        $result = $db->query("SELECT * FROM users");
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+          echo "Usuario: " . $row['name'] . "\\n";
+        }
+        $db->close();
+      `;
+      ccall('zend_eval_string', 'number', ['string','number','number'], [sqliteTest, 0, 0]);
+      const t12 = performance.now();
+      times.sqliteTest = t12 - t11;
+      log(`✅ Prueba SQLite completada en ${times.sqliteTest.toFixed(2)} ms`);
+
+      // --- Guardar cambios en IndexedDB ---
+      log('💾 Guardando cambios en IndexedDB…');
+      const t13 = performance.now();
+      await new Promise(resolve => FS.syncfs(false, resolve));
+      const t14 = performance.now();
+      times.saveFS = t14 - t13;
+      log(`✅ Guardado completo en ${times.saveFS.toFixed(2)} ms`);
+
+      log('⚡ Finalizando motor PHP…');
+      const t15 = performance.now();
+      ccall('php_embed_shutdown', 'number', [], []);
+      const t16 = performance.now();
+      times.shutdownPHP = t16 - t15;
+      log(`✅ Motor PHP finalizado en ${times.shutdownPHP.toFixed(2)} ms`);
+
+      const tEnd = performance.now();
+      times.total = tEnd - t0;
+
+      // --- Resumen de tiempos ---
+      log('\n⏱ Resumen de tiempos (ms):');
+      for (const [step, duration] of Object.entries(times)) {
+        log(` - ${step}: ${duration.toFixed(2)} ms`);
+      }
+    })();
+  </script>
+</body>
+</html>
+
